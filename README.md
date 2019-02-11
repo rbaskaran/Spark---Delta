@@ -1,2 +1,3 @@
 # Spark---Delta
-Find delta between large data sets using Spark
+Find delta between two large data sets using Spark - Scala.
+
