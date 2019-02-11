@@ -1,0 +1,166 @@
+package com.corporate.sub_corporate.delta_scala
+
+import scala.collection.mutable.ArrayBuffer
+import org.apache.spark.sql.functions.unix_timestamp
+import org.apache.spark.sql.functions._
+import org.apache.spark.sql.SparkSession
+
+
+/**
+ * @author Ram Baskaran
+ */
+object App {
+  
+  
+  def main(args : Array[String]) {
+    //println( "Hello World!" )
+    //println("concat arguments = " + foo(args))
+    
+    //How to execute
+    /*
+     * command for spark submit
+     * ./bin/spark-submit \
+     * --class <main-class> \
+     * --master <master-url> \
+     * --deploy-mode <deploy-mode> \
+     * --conf <key>=<value> \
+     * ... # other options
+     * <application-jar> \
+     * [application-arguments]
+     * 
+     * EXAMPLE:
+     * ./bin/spark-submit \
+     * --class com.corporate.sub_corporate.delta_scala.App \
+     * --master <master-url> \
+     * --deploy-mode <deploy-mode> \
+     * --conf <key>=<value> \
+     * /path/to/delta-scala-0.0.1-snapshot.jar \
+     * spark_delta \  --appName
+     * stg_sap_q10 \  --stage database
+     * sap_hist \  --target database
+     * kna1 \ --Table name
+     * /edw/app/sap/ --hdfs path
+     * 
+     * 
+     * 
+     *  spark-submit --master yarn --driver-memory 2g --num-executors 10 --executor-memory 4g --queue production --class com.corporate.sub_corporate.delta_scala.App ./delta-scala-0.0.1-snapshot.jar spark_delta stg_sap_q10 sap_test /edw/stging/sap1/qqq10/
+     *  
+     * 
+     * cd /usr/hdp/2.6.4.0-91/spark2/bin/
+     * ./spark-submit --master yarn --driver-memory 2g --num-executors 2 --executor-memory 4g --queue production --class src.main.scala.com.corporate.sub_corporate.delta_scala.App /tmp/user_id/delta-scala-0.0.1-snapshot.jar spark_delta stg_sap_PP10 table1 /edw/appliation/sap1/
+     *  
+     */
+    
+    //Set variables from arguments
+    // given app name is args(0)
+    val appName = args(2) + "_" + args(0) //Table name and app name concatenated to make unique
+    val stageDb = args(1)
+    val tableName = args(2)
+    val hdfsPath = args(3)
+    
+   
+    val prevDayTbl = tableName + "_prev"
+    val deltaTbl = tableName + "_ct"
+    val deltaHdfsPath = hdfsPath + stageDb + ".db/" + deltaTbl
+    
+    println("Application Name: " + appName)
+    println("Stage Database: " + stageDb)
+    println("Previous Day Table: " + prevDayTbl)
+    println("Current Day Table: " + tableName)
+    println("Delta Table: " + deltaTbl)
+    println("Target Table: " + tableName)
+    println("HDFS Path "  + hdfsPath)
+    println("Delta HDFS Path "  + deltaHdfsPath)
+
+    val spark = SparkSession
+      .builder()
+      .appName(appName)
+      .enableHiveSupport()
+      .getOrCreate()
+    
+    //PASS IN TABLE NAMES WHEN EXECUTING CLASS FROM ARGS
+    
+   
+     val df_prev = spark.sql("SELECT * FROM " + stageDb + "." + prevDayTbl); 
+     val df_curr = spark.sql("SELECT * FROM " + stageDb + "." + tableName); 
+     val df_key_table = spark.sql("SELECT key_cnt FROM " + stageDb + ".etl_key_count WHERE upper(table_name) = '" + tableName.toUpperCase() + "'"); 
+        
+     val df_prev_table_columns = df_prev.columns.toSeq 
+     val df_curr_table_columns = df_curr.columns.toSeq 
+
+
+
+   
+    
+    val key_count = df_key_table.select(col("key_cnt")).first.getInt(0)
+    val key_columns = df_curr_table_columns.slice(0,key_count)
+    
+    val all_columns = df_curr_table_columns.slice(0,df_curr_table_columns.size)
+    
+    //Create all columns array
+    val all_cols_array = ArrayBuffer[String]()
+    for (v <- all_columns) all_cols_array += v
+    
+    //println(all_cols_array)
+    
+    //Create key columns array
+    val key_cols_array = ArrayBuffer[String]()
+    for (v <- key_columns) key_cols_array += v
+    
+    
+    var df_prev_key_columns = df_prev.withColumn( "df_prev_table_key_columns_concat", concat_ws("", key_cols_array.map(c => col(c)): _*) )
+    var df_prev_all_columns = df_prev_key_columns.withColumn("df_prev_table_columns_concat", concat_ws("", all_cols_array.map(c => col(c)): _*) )
+    
+    
+    
+    var df_curr_key_columns = df_curr.withColumn( "df_curr_table_key_columns_concat", concat_ws("", key_cols_array.map(c => col(c)): _*) )
+    var df_curr_all_columns = df_curr_key_columns.withColumn("df_curr_table_columns_concat", concat_ws("", all_cols_array.map(c => col(c)): _*) )
+    
+    
+    df_prev_all_columns.createOrReplaceTempView("prev")
+    df_curr_all_columns.createOrReplaceTempView("curr")
+    
+    
+    val df_deleted = spark.sql("SELECT current_timestamp() as etl_ld_dttm, 'D' as header__change_oper,1 as header__deleted,   p.* FROM prev p LEFT OUTER JOIN curr c ON p.df_prev_table_key_columns_concat = c.df_curr_table_key_columns_concat WHERE df_curr_table_key_columns_concat IS NULL").drop("df_prev_table_key_columns_concat", "df_prev_table_columns_concat")
+    val df_inserted = spark.sql("SELECT current_timestamp() as etl_ld_dttm, 'I' as header__change_oper,0 as header__deleted, c.* FROM prev p RIGHT OUTER JOIN curr c ON p.df_prev_table_key_columns_concat = c.df_curr_table_key_columns_concat WHERE df_prev_table_key_columns_concat IS NULL").drop("df_curr_table_key_columns_concat", "df_curr_table_columns_concat")
+    val df_modified = spark.sql("SELECT current_timestamp() as etl_ld_dttm, 'U' as header__change_oper,0 as header__deleted,c.* FROM prev p INNER JOIN curr c ON p.df_prev_table_key_columns_concat = c.df_curr_table_key_columns_concat AND p.df_prev_table_columns_concat <> c.df_curr_table_columns_concat").drop("df_curr_table_key_columns_concat", "df_curr_table_columns_concat")
+    
+    
+    
+    
+    /*
+    Another way to do this in scala
+    val df_modified = df_prev_all_columns.join(df_curr_all_columns.as("df_curr_all_columns"), (df_curr_all_columns("df_curr_table_key_columns_concat") === df_prev_all_columns("df_prev_table_key_columns_concat")) && (df_curr_all_columns("df_curr_table_columns_concat") !== df_prev_all_columns("df_prev_table_columns_concat")) )
+    .select($"df_curr_all_columns.*")
+    */
+    
+    //println("Inserted :" + df_inserted.count() + " Deleted : " + df_deleted.count() + " Updated : " + df_modified.count() )
+        
+    //Union all into a single dataframe
+    
+    
+    val unioned_df = df_inserted.union(df_deleted).union(df_modified)
+    
+    
+     // println("Writing dataframe to HDFS - Count: " + unioned_df.count())
+    
+    
+    /*
+    Write the entire dataframe to a hive table with ORC
+    EXAMPLE:
+    unioned_df.write.mode("overwrite").partitionBy("example").format("parquet").saveAsTable("dbname.table")
+    NOTE: This is writing out to Snappy by default, not zlib. 
+    */
+    
+  
+    
+    unioned_df.write.mode("overwrite").format("orc").save(deltaHdfsPath)
+    //println("Completed overwrite to " + deltaHdfsPath)
+
+
+
+  }
+  
+
+
+}
